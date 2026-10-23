@@ -1,0 +1,174 @@
+<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>C03 · Session Configuration and History</title><link rel="stylesheet" href="/student.css"></head><body><main class="student-shell"><div class="student-brand"><a href="/">How <span>Claude Managed Agents</span> Works</a><span class="student-badge">CONCEPT 03 / 60</span></div><div class="student-hero"><div><div class="student-eyebrow">STUDENT APPLICATION GUIDE</div><h1>Session Configuration and History</h1><p>Understand the concepts, follow the source code, and verify the application yourself.</p></div><img src="/astronaut.png" alt=""></div><nav class="student-nav" aria-label="Application sections"><a href="/guide.html#learning">What you will learn</a><a href="/guide.html#run-guide">How to run</a><a href="/architecture.html">Architecture &amp; workflow</a><a href="/#application-lab">Application lab</a><button id="student-theme-toggle" type="button" aria-pressed="false">Switch to dark mode</button></nav><section class="student-section"><h2>Step 0 · Prepare the application before the workflow</h2><p>Use your own Anthropic API key and an existing agent ID and environment ID.</p><p>Run <code>npm run setup</code> once after setting your API key. It creates an environment and base agent and writes their IDs into your local .env. Reuse those IDs on later runs.</p><pre><code>npm ci
+Copy-Item .env.example .env
+npm run setup
+npm start</code></pre><p>Provision prerequisites once: environment first, then base agent. The script writes the returned IDs locally; the runtime workflow reuses them.</p><p class="student-source">Source: src/setup.ts · starting at line 1</p><pre><code>// One-time setup: an Environment and a base Agent that DOES have capabilities
+// (the built-in agent toolset), so the session override on slide 07 has
+// something to clear. Agents are persistent - run once, reuse the IDs.
+import Anthropic from &quot;@anthropic-ai/sdk&quot;;
+import { existsSync, readFileSync, writeFileSync } from &quot;node:fs&quot;;
+
+const client = new Anthropic();
+
+const environment = await client.beta.environments.create({
+  name: &quot;lesson-c03-env&quot;,
+  config: { type: &quot;cloud&quot;, networking: { type: &quot;limited&quot; } },
+});
+
+const agent = await client.beta.agents.create({
+  name: &quot;Lesson C03 Base Agent&quot;,
+  model: process.env.CLAUDE_MODEL ?? &quot;claude-opus-5-5&quot;,
+  system: &quot;You are a thorough research assistant. Explain your reasoning in detail.&quot;,
+  tools: [{ type: &quot;agent_toolset_20260401&quot; }],
+});
+
+const ids = { agentId: agent.id, agentVersion: agent.version, environmentId: environment.id };
+writeFileSync(&quot;.managed-ids.json&quot;, JSON.stringify(ids, null, 2));
+
+// The slides read the IDs from process.env, so write them into .env too.
+const env = existsSync(&quot;.env&quot;) ? readFileSync(&quot;.env&quot;, &quot;utf8&quot;) : &quot;&quot;;
+const upsert = (text: string, key: string, value: string) =&gt; {
+  const line = `${key}=${value}`;
+  const re = new RegExp(`^#?\s*${key}=.*$`, &quot;m&quot;);
+  return re.test(text) ? text.replace(re, line) : `${text.trimEnd()}\n${line}\n`;
+};
+let next = upsert(env, &quot;CLAUDE_MANAGED_AGENT_ID&quot;, agent.id);
+next = upsert(next, &quot;CLAUDE_MANAGED_ENVIRONMENT_ID&quot;, environment.id);
+writeFileSync(&quot;.env&quot;, next);
+
+console.log(&quot;Base agent:&quot;, { id: agent.id, version: agent.version, model: agent.model, tools: agent.tools.length });
+console.log(&quot;Saved .managed-ids.json and updated .env:&quot;, ids);</code></pre></section><section class="student-section"><h2>UML sequence diagram</h2><p>Read from top to bottom. Columns are participants; arrows are ordered messages. Open the full-size image or scroll horizontally to read every label.</p><p><a href="/architecture.svg" target="_blank" rel="noopener">Open SVG</a> · <a href="/architecture.svg" download>Download SVG</a> · <a href="/architecture.png" download>Download PNG</a></p><div class="student-diagram"><img src="/architecture.svg" alt="UML sequence diagram showing the actual lesson application workflow"></div></section><section class="student-section"><h2>Walk through the application step by step</h2><article class="student-step"><h3>1 · Submit the browser request · part 1</h3><p>The browser sends a same-origin request and updates the visible evidence. It never receives the API key.</p><p class="student-source">Source: public/app.js · starting at line 1</p><pre><code>const $ = selector =&gt; document.querySelector(selector);
+const button = $(&#x27;#run&#x27;), status = $(&#x27;#status&#x27;);
+fetch(&#x27;/api/config&#x27;).then(r =&gt; r.json()).then(c =&gt; { button.disabled = !c.configured; status.textContent = c.configured ? &#x27;Configuration ready. Your API key stays on the server.&#x27; : &#x27;Configure your API key and resource IDs in .env.&#x27;; }).catch(() =&gt; { button.disabled = true; status.textContent = &#x27;Could not check configuration.&#x27;; });
+button.addEventListener(&#x27;click&#x27;, async () =&gt; {
+  const prompt = $(&#x27;#prompt&#x27;).value.trim(); if (!prompt) { status.textContent = &#x27;Enter a prompt.&#x27;; return; }
+  button.disabled = true; status.textContent = &#x27;Creating session…&#x27;; $(&#x27;#events&#x27;).replaceChildren(); $(&#x27;#history&#x27;).textContent = &#x27;Waiting for the session to finish.&#x27;; $(&#x27;#answer&#x27;).hidden = true; $(&#x27;#answer&#x27;).textContent = &#x27;&#x27;; $(&#x27;#stored&#x27;).textContent = &#x27;Loading…&#x27;;
+  let sawStop = false, failed = false;
+  const handle = ({ type, value }) =&gt; {
+    if (type === &#x27;session&#x27;) { $(&#x27;#empty&#x27;).hidden = true; $(&#x27;#result&#x27;).hidden = false; $(&#x27;#session&#x27;).textContent = value.id; $(&#x27;#agent&#x27;).textContent = `${value.agentId} · version ${value.version}`; $(&#x27;#effective&#x27;).textContent = `Tools ${value.tools} · MCP ${value.mcp} · Skills ${value.skills}`; status.textContent = &#x27;Listening for live events…&#x27;; }
+    if (type === &#x27;stored&#x27;) $(&#x27;#stored&#x27;).textContent = `Tools ${value.tools} · MCP ${value.mcp} · Skills ${value.skills} · version ${value.version}`;
+    if (type === &#x27;event&#x27;) { const li = document.createElement(&#x27;li&#x27;); li.textContent = `${value.type} · ${value.id}`; $(&#x27;#events&#x27;).append(li); }
+    if (type === &#x27;answer&#x27;) { $(&#x27;#answer&#x27;).hidden = false; $(&#x27;#answer&#x27;).textContent += value; }
+    if (type === &#x27;history&#x27;) { $(&#x27;#history&#x27;).textContent = `${value.length} events recorded: ${value.map(e =&gt; e.type).join(&#x27;, &#x27;)}`; }
+    if (type === &#x27;stop&#x27;) { sawStop = true; status.textContent = `Session stopped: ${value}.`; }
+    if (type === &#x27;error&#x27;) { failed = true; status.textContent = value; }
+  };
+  try {
+    const response = await fetch(&#x27;/api/run&#x27;, { method: &#x27;POST&#x27;, headers: { &#x27;Content-Type&#x27;: &#x27;application/json&#x27; }, body: JSON.stringify({ prompt }) });
+    if (!response.ok) { const data = await response.json(); throw new Error(data.error || &#x27;Request failed&#x27;); }
+    const reader = response.body.getReader(), decoder = new TextDecoder(); let buffer = &#x27;&#x27;;
+    while (true) { const { done, value } = await reader.read(); buffer += decoder.decode(value || new Uint8Array(), { stream: !done }); const lines = buffer.split(&#x27;\n&#x27;); buffer = lines.pop(); for (const line of lines) if (line) handle(JSON.parse(line)); if (done) break; }
+    if (buffer.trim()) handle(JSON.parse(buffer));
+    if (!sawStop &amp;&amp; !failed) status.textContent = &#x27;Stream ended before a stop event; inspect the recorded session.&#x27;;
+  } catch (error) { status.textContent = error.message; }
+  finally { button.disabled = false; }
+});</code></pre></article><article class="student-step"><h3>2 · Execute the provider workflow · part 1</h3><p>The Node host validates input, uses configured resources, and returns observable evidence. Read the stream ordering and failure branches.</p><p class="student-source">Source: src/web.ts · starting at line 1</p><pre><code>import { serveStudentAsset } from &quot;./student-assets.js&quot;;
+import Anthropic from &quot;@anthropic-ai/sdk&quot;;
+import { createServer } from &quot;node:http&quot;;
+import { readFile } from &quot;node:fs/promises&quot;;
+import { writeFileSync } from &quot;node:fs&quot;;
+
+const port = Number(process.env.PORT || 3003);
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || &quot;not-configured&quot; });
+const root = new URL(&quot;../&quot;, import.meta.url);
+const configured = Boolean(process.env.ANTHROPIC_API_KEY &amp;&amp; process.env.CLAUDE_MANAGED_AGENT_ID &amp;&amp; process.env.CLAUDE_MANAGED_ENVIRONMENT_ID);
+
+createServer(async (req, res) =&gt; {
+  const pathname = new URL(req.url || &quot;/&quot;, &quot;http://localhost&quot;).pathname;
+  const assets: Record&lt;string, [string, string]&gt; = { &quot;/&quot;: [&quot;index.html&quot;, &quot;text/html; charset=utf-8&quot;], &quot;/style.css&quot;: [&quot;style.css&quot;, &quot;text/css; charset=utf-8&quot;], &quot;/app.js&quot;: [&quot;app.js&quot;, &quot;text/javascript; charset=utf-8&quot;], &quot;/astronaut.png&quot;: [&quot;astronaut.png&quot;, &quot;image/png&quot;] };
+  try {
+    if (await serveStudentAsset(req, res)) return;
+    if (req.method === &quot;GET&quot; &amp;&amp; assets[pathname]) {
+      const [file, type] = assets[pathname]; const content = await readFile(new URL(`public/${file}`, root));
+      res.writeHead(200, { &quot;Content-Type&quot;: type, &quot;Cache-Control&quot;: &quot;no-store&quot; }); res.end(content); return;
+    }
+    if (req.method === &quot;GET&quot; &amp;&amp; pathname === &quot;/api/config&quot;) {
+      res.writeHead(200, { &quot;Content-Type&quot;: &quot;application/json&quot; }); res.end(JSON.stringify({ configured })); return;
+    }
+    if (req.method === &quot;POST&quot; &amp;&amp; pathname === &quot;/api/run&quot;) {
+      const origin = req.headers.origin;
+      if (origin &amp;&amp; origin !== `http://127.0.0.1:${port}` &amp;&amp; origin !== `http://localhost:${port}`) { res.writeHead(403).end(); return; }
+      let body = &quot;&quot;;
+      for await (const chunk of req) { body += chunk; if (body.length &gt; 10000) throw new Error(&quot;Request too large&quot;); }</code></pre></article><article class="student-step"><h3>2 · Execute the provider workflow · part 2</h3><p>The Node host validates input, uses configured resources, and returns observable evidence. Read the stream ordering and failure branches.</p><p class="student-source">Source: src/web.ts · starting at line 29</p><pre><code>      const data = JSON.parse(body || &quot;{}&quot;);
+      if (typeof data.prompt !== &quot;string&quot; || !data.prompt.trim() || data.prompt.length &gt; 2000) throw new Error(&quot;Enter a prompt of up to 2,000 characters.&quot;);
+      if (!configured) throw new Error(&quot;Configure the API key, agent ID and environment ID in .env.&quot;);
+      res.writeHead(200, { &quot;Content-Type&quot;: &quot;application/x-ndjson; charset=utf-8&quot;, &quot;Cache-Control&quot;: &quot;no-store&quot; });
+      const send = (type: string, value: unknown) =&gt; { if (!res.destroyed) res.write(JSON.stringify({ type, value }) + &quot;\n&quot;); };
+      try {
+        const session = await client.beta.sessions.create({ agent: { type: &quot;agent_with_overrides&quot;, id: process.env.CLAUDE_MANAGED_AGENT_ID!, ...(process.env.CLAUDE_SESSION_MODEL ? { model: process.env.CLAUDE_SESSION_MODEL } : {}), system: &quot;Answer in one sentence.&quot;, tools: [], mcp_servers: [], skills: [] }, environment_id: process.env.CLAUDE_MANAGED_ENVIRONMENT_ID!, budget: { type: &quot;limit&quot;, max_list_cost: { currency: &quot;USD&quot;, amount: &quot;50&quot; } } });
+        writeFileSync(&quot;.last-session&quot;, session.id);
+        send(&quot;session&quot;, { id: session.id, agentId: session.agent.id, version: session.agent.version, tools: session.agent.tools.length, mcp: session.agent.mcp_servers.length, skills: session.agent.skills.length });
+        const stored = await client.beta.agents.retrieve(session.agent.id);
+        send(&quot;stored&quot;, { version: stored.version, tools: stored.tools.length, mcp: stored.mcp_servers.length, skills: stored.skills.length });
+        const live = await client.beta.sessions.events.stream(session.id);
+        res.on(&quot;close&quot;, () =&gt; live.controller.abort());
+        await client.beta.sessions.events.send(session.id, { events: [{ type: &quot;user.message&quot;, content: [{ type: &quot;text&quot;, text: data.prompt.trim() }] }] });
+        for await (const event of live) {
+          send(&quot;event&quot;, { id: &quot;id&quot; in event ? event.id : &quot;stream update&quot;, type: event.type });
+          if (event.type === &quot;agent.message&quot;) for (const block of event.content) if (block.type === &quot;text&quot;) send(&quot;answer&quot;, block.text);
+          if (event.type === &quot;session.status_idle&quot; &amp;&amp; event.stop_reason.type !== &quot;requires_action&quot;) { send(&quot;stop&quot;, event.stop_reason.type); break; }
+          if (event.type === &quot;session.status_terminated&quot;) { send(&quot;stop&quot;, &quot;terminated&quot;); break; }
+          if (event.type === &quot;session.error&quot;) { send(&quot;error&quot;, &quot;The session reported an error. Inspect its history for details.&quot;); break; }
+        }
+        const history: { id: string; type: string }[] = [];
+        for await (const event of client.beta.sessions.events.list(session.id)) history.push({ id: event.id, type: event.type });
+        send(&quot;history&quot;, history);
+      } catch (error) { send(&quot;error&quot;, error instanceof Error ? error.message : &quot;Run failed&quot;); }
+      res.end(); return;
+    }
+    res.writeHead(404).end(&quot;Not found&quot;);</code></pre></article><article class="student-step"><h3>2 · Execute the provider workflow · part 3</h3><p>The Node host validates input, uses configured resources, and returns observable evidence. Read the stream ordering and failure branches.</p><p class="student-source">Source: src/web.ts · starting at line 57</p><pre><code>  } catch (error) { if (!res.headersSent) res.writeHead(400, { &quot;Content-Type&quot;: &quot;application/json&quot; }); res.end(JSON.stringify({ error: error instanceof Error ? error.message : &quot;Request failed&quot; })); }
+}).listen(port, &quot;127.0.0.1&quot;, () =&gt; console.log(`Open http://127.0.0.1:${port}`));</code></pre></article><article class="student-step"><h3>3 · Understand the lesson-specific rules · part 1</h3><p>Creates a real text-only override session, compares configurations, opens the stream before sending, and reads recorded history. Closing the browser stops observation; it does not interrupt remote work.</p><p class="student-source">Source: src/web.ts · starting at line 1</p><pre><code>import { serveStudentAsset } from &quot;./student-assets.js&quot;;
+import Anthropic from &quot;@anthropic-ai/sdk&quot;;
+import { createServer } from &quot;node:http&quot;;
+import { readFile } from &quot;node:fs/promises&quot;;
+import { writeFileSync } from &quot;node:fs&quot;;
+
+const port = Number(process.env.PORT || 3003);
+const client = new Anthropic({ apiKey: process.env.ANTHROPIC_API_KEY || &quot;not-configured&quot; });
+const root = new URL(&quot;../&quot;, import.meta.url);
+const configured = Boolean(process.env.ANTHROPIC_API_KEY &amp;&amp; process.env.CLAUDE_MANAGED_AGENT_ID &amp;&amp; process.env.CLAUDE_MANAGED_ENVIRONMENT_ID);
+
+createServer(async (req, res) =&gt; {
+  const pathname = new URL(req.url || &quot;/&quot;, &quot;http://localhost&quot;).pathname;
+  const assets: Record&lt;string, [string, string]&gt; = { &quot;/&quot;: [&quot;index.html&quot;, &quot;text/html; charset=utf-8&quot;], &quot;/style.css&quot;: [&quot;style.css&quot;, &quot;text/css; charset=utf-8&quot;], &quot;/app.js&quot;: [&quot;app.js&quot;, &quot;text/javascript; charset=utf-8&quot;], &quot;/astronaut.png&quot;: [&quot;astronaut.png&quot;, &quot;image/png&quot;] };
+  try {
+    if (await serveStudentAsset(req, res)) return;
+    if (req.method === &quot;GET&quot; &amp;&amp; assets[pathname]) {
+      const [file, type] = assets[pathname]; const content = await readFile(new URL(`public/${file}`, root));
+      res.writeHead(200, { &quot;Content-Type&quot;: type, &quot;Cache-Control&quot;: &quot;no-store&quot; }); res.end(content); return;
+    }
+    if (req.method === &quot;GET&quot; &amp;&amp; pathname === &quot;/api/config&quot;) {
+      res.writeHead(200, { &quot;Content-Type&quot;: &quot;application/json&quot; }); res.end(JSON.stringify({ configured })); return;
+    }
+    if (req.method === &quot;POST&quot; &amp;&amp; pathname === &quot;/api/run&quot;) {
+      const origin = req.headers.origin;
+      if (origin &amp;&amp; origin !== `http://127.0.0.1:${port}` &amp;&amp; origin !== `http://localhost:${port}`) { res.writeHead(403).end(); return; }
+      let body = &quot;&quot;;
+      for await (const chunk of req) { body += chunk; if (body.length &gt; 10000) throw new Error(&quot;Request too large&quot;); }</code></pre></article><article class="student-step"><h3>3 · Understand the lesson-specific rules · part 2</h3><p>Creates a real text-only override session, compares configurations, opens the stream before sending, and reads recorded history. Closing the browser stops observation; it does not interrupt remote work.</p><p class="student-source">Source: src/web.ts · starting at line 29</p><pre><code>      const data = JSON.parse(body || &quot;{}&quot;);
+      if (typeof data.prompt !== &quot;string&quot; || !data.prompt.trim() || data.prompt.length &gt; 2000) throw new Error(&quot;Enter a prompt of up to 2,000 characters.&quot;);
+      if (!configured) throw new Error(&quot;Configure the API key, agent ID and environment ID in .env.&quot;);
+      res.writeHead(200, { &quot;Content-Type&quot;: &quot;application/x-ndjson; charset=utf-8&quot;, &quot;Cache-Control&quot;: &quot;no-store&quot; });
+      const send = (type: string, value: unknown) =&gt; { if (!res.destroyed) res.write(JSON.stringify({ type, value }) + &quot;\n&quot;); };
+      try {
+        const session = await client.beta.sessions.create({ agent: { type: &quot;agent_with_overrides&quot;, id: process.env.CLAUDE_MANAGED_AGENT_ID!, ...(process.env.CLAUDE_SESSION_MODEL ? { model: process.env.CLAUDE_SESSION_MODEL } : {}), system: &quot;Answer in one sentence.&quot;, tools: [], mcp_servers: [], skills: [] }, environment_id: process.env.CLAUDE_MANAGED_ENVIRONMENT_ID!, budget: { type: &quot;limit&quot;, max_list_cost: { currency: &quot;USD&quot;, amount: &quot;50&quot; } } });
+        writeFileSync(&quot;.last-session&quot;, session.id);
+        send(&quot;session&quot;, { id: session.id, agentId: session.agent.id, version: session.agent.version, tools: session.agent.tools.length, mcp: session.agent.mcp_servers.length, skills: session.agent.skills.length });
+        const stored = await client.beta.agents.retrieve(session.agent.id);
+        send(&quot;stored&quot;, { version: stored.version, tools: stored.tools.length, mcp: stored.mcp_servers.length, skills: stored.skills.length });
+        const live = await client.beta.sessions.events.stream(session.id);
+        res.on(&quot;close&quot;, () =&gt; live.controller.abort());
+        await client.beta.sessions.events.send(session.id, { events: [{ type: &quot;user.message&quot;, content: [{ type: &quot;text&quot;, text: data.prompt.trim() }] }] });
+        for await (const event of live) {
+          send(&quot;event&quot;, { id: &quot;id&quot; in event ? event.id : &quot;stream update&quot;, type: event.type });
+          if (event.type === &quot;agent.message&quot;) for (const block of event.content) if (block.type === &quot;text&quot;) send(&quot;answer&quot;, block.text);
+          if (event.type === &quot;session.status_idle&quot; &amp;&amp; event.stop_reason.type !== &quot;requires_action&quot;) { send(&quot;stop&quot;, event.stop_reason.type); break; }
+          if (event.type === &quot;session.status_terminated&quot;) { send(&quot;stop&quot;, &quot;terminated&quot;); break; }
+          if (event.type === &quot;session.error&quot;) { send(&quot;error&quot;, &quot;The session reported an error. Inspect its history for details.&quot;); break; }
+        }
+        const history: { id: string; type: string }[] = [];
+        for await (const event of client.beta.sessions.events.list(session.id)) history.push({ id: event.id, type: event.type });
+        send(&quot;history&quot;, history);
+      } catch (error) { send(&quot;error&quot;, error instanceof Error ? error.message : &quot;Run failed&quot;); }
+      res.end(); return;
+    }
+    res.writeHead(404).end(&quot;Not found&quot;);</code></pre></article><article class="student-step"><h3>3 · Understand the lesson-specific rules · part 3</h3><p>Creates a real text-only override session, compares configurations, opens the stream before sending, and reads recorded history. Closing the browser stops observation; it does not interrupt remote work.</p><p class="student-source">Source: src/web.ts · starting at line 57</p><pre><code>  } catch (error) { if (!res.headersSent) res.writeHead(400, { &quot;Content-Type&quot;: &quot;application/json&quot; }); res.end(JSON.stringify({ error: error instanceof Error ? error.message : &quot;Request failed&quot; })); }
+}).listen(port, &quot;127.0.0.1&quot;, () =&gt; console.log(`Open http://127.0.0.1:${port}`));</code></pre></article></section><section class="student-section"><h2>What the evidence proves</h2><p class="student-note">Creates a real text-only override session, compares configurations, opens the stream before sending, and reads recorded history. Closing the browser stops observation; it does not interrupt remote work.</p><p>Check the displayed outcome and source together. A rendered answer alone does not prove that a tool ran, a remote operation succeeded, or work was cancelled.</p></section><footer>LESSON C03 · LEARN → CONFIGURE → RUN → VERIFY<p><a href="/guide.html#learning">Learning goals</a> · <a href="/guide.html#run-guide">Run instructions</a> · <a href="/architecture.html">Workflow</a> · <a href="/#application-lab">Lab</a></p></footer></main><script src="/navigation.js"></script></body></html>

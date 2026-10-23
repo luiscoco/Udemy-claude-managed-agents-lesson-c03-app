@@ -1,0 +1,28 @@
+{
+  "name": "lesson-c03-app",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Lesson C03 - session overrides, resolved snapshot, live stream vs. recorded history",
+  "scripts": {
+    "setup": "tsx --env-file-if-exists=.env src/setup.ts",
+    "dev": "tsx --env-file-if-exists=.env src/web.ts",
+    "session": "tsx --env-file-if-exists=.env src/session.ts",
+    "history": "tsx --env-file-if-exists=.env src/history.ts",
+    "typecheck": "tsc --noEmit",
+    "web": "tsx --env-file-if-exists=.env src/web.ts",
+    "start": "npm run web"
+  },
+  "dependencies": {
+    "@anthropic-ai/sdk": "^0.135.0"
+  },
+  "devDependencies": {
+    "@types/node": "^26.6.5",
+    "playwright": "^1.56.1",
+    "tsx": "^4.23.15",
+    "typescript": "^7.0.2"
+  },
+  "engines": {
+    "node": ">=24"
+  }
+}
